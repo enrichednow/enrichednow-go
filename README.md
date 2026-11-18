@@ -243,13 +243,14 @@ A request that got no answer — a dropped connection, a timeout — is a `*Conn
 
 ## Retries
 
-Requests that are safe to repeat — every read, and cancelling a run — are sent again up to twice
+Requests that are safe to repeat — every read, cancelling a run, and starting one — are sent again up to twice
 (`WithMaxRetries`) after a connection error, a 5xx, or a 429 that is about the rate of requests. The pause is
 what `Retry-After` asks for, or else 0.5 s doubling up to 8 s, with jitter.
 
-**Starting a run is never retried.** The API has no idempotency key, so a repeated `POST` would start — and charge
-for — a second run. If `Scrapers.Run` or `Scrape` fails without an answer, the run may exist all the same: look at
-`client.Runs.List` before starting it again.
+**Starting a run is safe to repeat too.** `Scrapers.Run` and `Scrape` send an `Idempotency-Key` with the request, a
+new one for each call, so a retry gets the run the first attempt started and never a second one. To make a call of
+your own repeatable (a job that may be restarted, say), set `RunParams.IdempotencyKey`: for 24 hours the same key
+with the same request gives the same run, and with a different request fails with `ErrConflict`.
 
 ## The raw JSON
 

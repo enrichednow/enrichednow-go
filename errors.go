@@ -22,6 +22,8 @@ var (
 	ErrPermission = errors.New("enrichednow: not allowed")
 	// ErrNotFound: there is no such scraper, run, company or posting (404 not_found).
 	ErrNotFound = errors.New("enrichednow: not found")
+	// ErrConflict: the idempotency key was already used for a different request (409 idempotency_conflict).
+	ErrConflict = errors.New("enrichednow: idempotency key already used")
 	// ErrValidation: the request does not fit (422 invalid_input). [APIError.Fields] lists the problems.
 	ErrValidation = errors.New("enrichednow: invalid input")
 	// ErrQuotaExceeded: this month's allowance is used up (402 quota_exceeded).
@@ -113,6 +115,8 @@ func (e *APIError) Is(target error) bool {
 		return e.StatusCode == http.StatusForbidden || e.Code == CodeForbidden
 	case ErrNotFound:
 		return e.StatusCode == http.StatusNotFound || e.Code == CodeNotFound
+	case ErrConflict:
+		return e.StatusCode == http.StatusConflict
 	case ErrValidation:
 		return e.StatusCode == http.StatusUnprocessableEntity || e.Code == CodeInvalidInput
 	case ErrQuotaExceeded:

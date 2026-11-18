@@ -2,6 +2,8 @@ package enrichednow
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -43,14 +45,29 @@ type RunParams struct {
 	// comes first: from 0 to [MaxWait]. A run that has not ended by then is returned queued or running;
 	// follow it with [RunService.Wait].
 	Wait time.Duration
+	// IdempotencyKey names this call so that it can be repeated without starting a second run: for 24 hours the
+	// same key with the same request gives the run the first call started, and with a different request fails
+	// with [ErrConflict]. Any text of yours, up to 255 characters, no spaces. Empty: a new key for each call,
+	// which is what makes its retries safe.
+	IdempotencyKey string
+}
+
+// newIdempotencyKey is 32 random hex characters: one call's own key.
+func newIdempotencyKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16) // no randomness to be had: unique enough for one process
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Run starts a run of a scraper and returns it: usually queued, or already ended when params.Wait was long
 // enough. input is the scraper's input (a map or a struct that encodes to a JSON object); see the scraper's
 // input schema.
 //
-// Starting a run is not safe to repeat, so this call is never retried. If it fails without an answer (a timeout,
-// a dropped connection), the run may exist all the same: look at [RunService.List] before starting it again.
+// The request carries an Idempotency-Key, so it is safe to send again: after a connection error or a 5xx it is
+// retried with the same key, and the API answers with the run the first attempt started, never a second one.
+// Set [RunParams.IdempotencyKey] to make a call of yours repeatable across processes.
 //
 // A run that ended failed, unsupported or cancelled is returned without an error, as the API answers it; call
 // [Run.Err] to turn its status into one.
@@ -62,7 +79,13 @@ func (s *ScraperService) Run(ctx context.Context, scraperID string, input any, p
 	if input == nil {
 		input = map[string]any{}
 	}
-	r := request{method: http.MethodPost, path: "/v1/scrapers/" + id + "/runs", body: map[string]any{"input": input}}
+	r := request{method: http.MethodPost, path: "/v1/scrapers/" + id + "/runs", body: map[string]any{"input": input}, retry: true}
+	if params != nil {
+		r.idempotencyKey = params.IdempotencyKey
+	}
+	if r.idempotencyKey == "" {
+		r.idempotencyKey = newIdempotencyKey()
+	}
 	if params != nil && params.Wait > 0 {
 		r.query = url.Values{"wait": {strconv.FormatFloat(params.Wait.Seconds(), 'f', -1, 64)}}
 		r.extraTimeout = params.Wait

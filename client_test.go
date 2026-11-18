@@ -455,36 +455,62 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 	}
 }
 
-func TestStartingARunIsNeverRetried(t *testing.T) {
-	for _, status := range []int{500, 503, 429} {
-		var n atomic.Int32
-		c, rec := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			n.Add(1)
-			w.Header().Set("Retry-After", "1")
-			writeJSON(w, status, apiErrorBody("internal", "x", ""))
-		})
-		if _, err := c.Scrapers.Run(context.Background(), "ats.board", nil, nil); err == nil {
-			t.Fatal("want an error")
+func TestStartingARunIsRetriedWithTheSameIdempotencyKey(t *testing.T) {
+	var keys []string
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		switch len(keys) {
+		case 1:
+			writeJSON(w, 500, apiErrorBody("internal", "x", ""))
+		case 2:
+			hijackAndClose(t, w)
+		default:
+			writeJSON(w, 202, runJSON("run_1", "queued", "", 0))
 		}
-		if n.Load() != 1 || len(rec.delays) != 0 {
-			t.Errorf("status %d: %d attempts, want exactly 1", status, n.Load())
-		}
+	})
+	run, err := c.Scrapers.Run(context.Background(), "ats.board", nil, nil)
+	if err != nil || run.ID != "run_1" {
+		t.Fatalf("run = %v, err = %v", run, err)
+	}
+	if len(keys) != 3 || len(keys[0]) != 32 || keys[0] != keys[1] || keys[1] != keys[2] {
+		t.Errorf("keys = %v; want one 32-character key sent three times", keys)
 	}
 }
 
-func TestStartingARunIsNotRetriedOnAConnectionError(t *testing.T) {
-	var n atomic.Int32
-	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		n.Add(1)
-		hijackAndClose(t, w)
+func TestEachCallHasItsOwnKeyUnlessOneIsGiven(t *testing.T) {
+	var keys []string
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		if len(keys) == 4 {
+			writeJSON(w, 409, apiErrorBody("idempotency_conflict", "Used.", ""))
+			return
+		}
+		writeJSON(w, 202, runJSON("run_1", "queued", "", 0))
 	})
-	_, err := c.Scrapers.Run(context.Background(), "ats.board", nil, nil)
-	if err == nil || n.Load() != 1 {
-		t.Fatalf("err = %v after %d attempts; want an error after exactly 1", err, n.Load())
+	ctx := context.Background()
+	_, _ = c.Scrapers.Run(ctx, "ats.board", nil, nil)
+	_, _ = c.Scrapers.Run(ctx, "ats.board", nil, &RunParams{Wait: time.Second})
+	_, _ = c.Scrapers.Run(ctx, "ats.board", nil, &RunParams{IdempotencyKey: "import-acme"})
+	_, err := c.Scrapers.Run(ctx, "ats.board", nil, &RunParams{IdempotencyKey: "import-acme"})
+	if keys[0] == keys[1] || keys[2] != "import-acme" {
+		t.Errorf("keys = %v", keys)
 	}
-	var conn *ConnectionError
-	if !errors.As(err, &conn) || conn.Method != "POST" || conn.Path != "/v1/scrapers/ats.board/runs" {
-		t.Errorf("a dropped connection should be a *ConnectionError, got %T %v", err, err)
+	if !errors.Is(err, ErrConflict) || len(keys) != 4 {
+		t.Errorf("a 409 should be ErrConflict and not retried: %v after %d requests", err, len(keys))
+	}
+}
+
+func TestTooManyRunsIsNotRetriedWhenStartingARun(t *testing.T) {
+	var n atomic.Int32
+	c, rec := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		n.Add(1)
+		writeJSON(w, 429, apiErrorBody("too_many_runs", "x", ""))
+	})
+	if _, err := c.Scrapers.Run(context.Background(), "ats.board", nil, nil); !errors.Is(err, ErrTooManyRuns) {
+		t.Fatalf("err = %v", err)
+	}
+	if n.Load() != 1 || len(rec.delays) != 0 {
+		t.Errorf("%d attempts, want exactly 1: it clears when a run ends, not after a pause", n.Load())
 	}
 }
 

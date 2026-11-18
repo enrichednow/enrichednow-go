@@ -104,6 +104,8 @@ type request struct {
 	retry bool
 	// extraTimeout is added to the client's timeout, for a request the API holds open.
 	extraTimeout time.Duration
+	// idempotencyKey is sent as the Idempotency-Key header: what makes starting a run safe to send again.
+	idempotencyKey string
 }
 
 const (
@@ -168,6 +170,9 @@ func (c *Client) attempt(ctx context.Context, r request, target string, payload 
 	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	if r.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", r.idempotencyKey)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
