@@ -1,10 +1,13 @@
 package enrichednow
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -37,7 +40,10 @@ func (s *ScraperService) Get(ctx context.Context, scraperID string) (*ScraperDet
 }
 
 // MaxWait is the longest the API holds a request open for a run to end.
-const MaxWait = 60 * time.Second
+const MaxWait = 300 * time.Second
+
+// ScrapeWait is how long [Client.Scrape] asks the API to hold its first request before it polls.
+const ScrapeWait = 60 * time.Second
 
 // RunParams are the options of [ScraperService.Run].
 type RunParams struct {
@@ -50,6 +56,9 @@ type RunParams struct {
 	// with [ErrConflict]. Any text of yours, up to 255 characters, no spaces. Empty: a new key for each call,
 	// which is what makes its retries safe.
 	IdempotencyKey string
+	// WebhookURL is an https URL that is sent a signed POST when this run ends, whichever way it ends, beside the
+	// account's webhook endpoints. The account needs a secret for these first: [WebhookService.CreateRunSecret].
+	WebhookURL string
 }
 
 // newIdempotencyKey is 32 random hex characters: one call's own key.
@@ -79,9 +88,16 @@ func (s *ScraperService) Run(ctx context.Context, scraperID string, input any, p
 	if input == nil {
 		input = map[string]any{}
 	}
-	r := request{method: http.MethodPost, path: "/v1/scrapers/" + id + "/runs", body: map[string]any{"input": input}, retry: true}
+	body := map[string]any{"input": input}
+	r := request{method: http.MethodPost, path: "/v1/scrapers/" + id + "/runs", body: body, retry: true}
 	if params != nil {
 		r.idempotencyKey = params.IdempotencyKey
+		if params.WebhookURL != "" {
+			body["webhook_url"] = params.WebhookURL
+		}
+		if params.Wait < 0 || params.Wait > MaxWait {
+			return nil, fmt.Errorf("enrichednow: Wait must be from 0 to %s", MaxWait)
+		}
 	}
 	if r.idempotencyKey == "" {
 		r.idempotencyKey = newIdempotencyKey()
@@ -113,6 +129,28 @@ func (s *RunService) Get(ctx context.Context, runID string) (*Run, error) {
 	return &out, nil
 }
 
+// GetWait returns a run when it has ended, or as it is once wait (at most [MaxWait]) has passed: the API holds the
+// request open in the meantime, so one call does what a few polls would.
+func (s *RunService) GetWait(ctx context.Context, runID string, wait time.Duration) (*Run, error) {
+	id, err := pathEscape("run id", runID)
+	if err != nil {
+		return nil, err
+	}
+	if wait < 0 || wait > MaxWait {
+		return nil, fmt.Errorf("enrichednow: wait must be from 0 to %s", MaxWait)
+	}
+	r := request{method: http.MethodGet, path: "/v1/runs/" + id, retry: true}
+	if wait > 0 {
+		r.query = url.Values{"wait": {strconv.FormatFloat(wait.Seconds(), 'f', -1, 64)}}
+		r.extraTimeout = wait
+	}
+	var out Run
+	if err := s.client.do(ctx, r, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // RunListParams filter and page [RunService.List].
 type RunListParams struct {
 	// Limit is the runs per page: 1 to 100. Zero leaves it to the API (20).
@@ -123,6 +161,10 @@ type RunListParams struct {
 	ScraperID string
 	// Status keeps only the runs with this status.
 	Status RunStatus
+	// APIKeyID keeps only the runs one API key started (key_…).
+	APIKeyID string
+	// From and To keep only the runs created in that span: at or after From, before To.
+	From, To time.Time
 }
 
 // List returns one page of the account's runs, newest first.
@@ -133,6 +175,9 @@ func (s *RunService) List(ctx context.Context, params *RunListParams) (*RunPage,
 		setString(q, "cursor", params.Cursor)
 		setString(q, "scraper_id", params.ScraperID)
 		setString(q, "status", string(params.Status))
+		setString(q, "api_key_id", params.APIKeyID)
+		setTime(q, "from", params.From)
+		setTime(q, "to", params.To)
 	}
 	var out RunPage
 	if err := s.client.do(ctx, request{method: http.MethodGet, path: "/v1/runs", query: q, retry: true}, &out); err != nil {
@@ -272,7 +317,7 @@ func (s *RunService) Records(ctx context.Context, runID string, params *RecordLi
 // status and the reason; the run is returned too. How long Scrape waits is up to the context. If the context
 // ends first, the run goes on: the run returned with the context's error has the id to follow or cancel it.
 func (c *Client) Scrape(ctx context.Context, scraperID string, input any) (*Run, *Iter[json.RawMessage], error) {
-	run, err := c.Scrapers.Run(ctx, scraperID, input, &RunParams{Wait: MaxWait})
+	run, err := c.Scrapers.Run(ctx, scraperID, input, &RunParams{Wait: ScrapeWait})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -291,8 +336,103 @@ func (c *Client) Scrape(ctx context.Context, scraperID string, input any) (*Run,
 	return run, c.Runs.Records(ctx, run.ID, &RecordListParams{Limit: 1000}), nil
 }
 
+// ExportParams are the options of [RunService.Export].
+type ExportParams struct {
+	// Format is [FormatCSV] or [FormatNDJSON].
+	Format string
+	// Limit is the records per page: 1 to 1000. Zero leaves it to the API (100).
+	Limit int
+	// Cursor is the NextCursor of the page before.
+	Cursor string
+}
+
+// Export returns one page of a run's records written by the API, as CSV or NDJSON.
+//
+// The CSV has a column for each field of the scraper's record schema (a nested object becomes parent.child
+// columns, a list one cell of JSON, and a cell a spreadsheet would run as a formula starts with an apostrophe),
+// and every page begins with the header row. NextCursor continues; [RunService.ExportAll] follows it for you.
+func (s *RunService) Export(ctx context.Context, runID string, params ExportParams) (*RecordsExport, error) {
+	id, err := pathEscape("run id", runID)
+	if err != nil {
+		return nil, err
+	}
+	accept := map[string]string{FormatCSV: "text/csv", FormatNDJSON: "application/x-ndjson"}[params.Format]
+	if accept == "" {
+		return nil, fmt.Errorf("enrichednow: the format %q is not csv or ndjson; for JSON use RecordsPage", params.Format)
+	}
+	q := url.Values{"format": {params.Format}}
+	setInt(q, "limit", params.Limit)
+	setString(q, "cursor", params.Cursor)
+	got, err := s.client.send(ctx, request{method: http.MethodGet, path: "/v1/runs/" + id + "/records", query: q, retry: true, accept: accept})
+	if err != nil {
+		return nil, err
+	}
+	return &RecordsExport{Format: params.Format, Body: got.data, NextCursor: got.header.Get("X-Next-Cursor"),
+		Expired: got.header.Get("X-Records-Expired") == "true"}, nil
+}
+
+// ExportAll writes every record of a run to w, as CSV or NDJSON, a page of 1000 at a time: the result is one file
+// (a CSV has its header row once). It stops with [ErrRecordsExpired] when the records are gone.
+func (s *RunService) ExportAll(ctx context.Context, runID, format string, w io.Writer) error {
+	cursor := ""
+	for first := true; ; first = false {
+		page, err := s.Export(ctx, runID, ExportParams{Format: format, Limit: 1000, Cursor: cursor})
+		if err != nil {
+			return err
+		}
+		if page.Expired {
+			return ErrRecordsExpired
+		}
+		body := page.Body
+		if !first && format == FormatCSV {
+			if end := bytes.IndexByte(body, '\n'); end >= 0 {
+				body = body[end+1:]
+			} else {
+				body = nil
+			}
+		}
+		if _, err := w.Write(body); err != nil {
+			return err
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// File returns a file the run produced (a screenshot, say), read with this client's key. A record also carries
+// the file's own address, which works without a key for an hour.
+func (s *RunService) File(ctx context.Context, runID, name string) ([]byte, error) {
+	id, err := pathEscape("run id", runID)
+	if err != nil {
+		return nil, err
+	}
+	file, err := pathEscape("file name", name)
+	if err != nil {
+		return nil, err
+	}
+	got, err := s.client.send(ctx, request{method: http.MethodGet, path: "/v1/runs/" + id + "/files/" + file, retry: true, accept: "*/*"})
+	if err != nil {
+		return nil, err
+	}
+	return got.data, nil
+}
+
 // UsageService reports the units used.
 type UsageService struct{ client *Client }
+
+// Standing asks where the account stands now: the month's units used and left, the top-up units, when the
+// allowance starts again, and runs in progress. It is read from the headers of the smallest call that carries them.
+func (s *UsageService) Standing(ctx context.Context) (*Standing, error) {
+	if _, err := s.client.send(ctx, request{method: http.MethodGet, path: "/v1/runs", query: url.Values{"limit": {"1"}}, retry: true}); err != nil {
+		return nil, err
+	}
+	if got := s.client.Standing(); got != nil {
+		return got, nil
+	}
+	return &Standing{}, nil
+}
 
 // UsageParams choose the period and the grouping of [UsageService.Get].
 type UsageParams struct {

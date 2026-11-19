@@ -128,6 +128,62 @@ type Usage struct {
 	// allowance when the request named the data product.
 	AllowanceUnits int        `json:"allowance_units"`
 	Rows           []UsageRow `json:"rows"`
+	// Unmetered is true for an account with no unit limit (the service's own): nothing it does is refused for units.
+	Unmetered bool `json:"unmetered"`
+}
+
+// Standing is where the account stands, as the API says it in the headers of every answer about runs
+// (X-Units-*, X-RateLimit-*). A number the answer did not carry is nil.
+type Standing struct {
+	// UnitsLimit is the month's allowance of units. For an unmetered account, the largest number the API's
+	// integers hold.
+	UnitsLimit *int64
+	// UnitsUsed is the units of the month's allowance used so far.
+	UnitsUsed *int64
+	// UnitsRemaining is the units of the month's allowance left. Top-up units are counted apart.
+	UnitsRemaining *int64
+	// UnitsTopup is the top-up units left: spent once the month's allowance is used up; they do not expire.
+	UnitsTopup *int64
+	// UnitsReset is when the allowance starts again: the first of next month, UTC.
+	UnitsReset *time.Time
+	// RunsLimit is how many runs the account may have in progress at the same time.
+	RunsLimit *int64
+	// RunsRemaining is how many more runs can be started now.
+	RunsRemaining *int64
+	// Unmetered is true for an account with no unit limit.
+	Unmetered bool
+}
+
+// UnitsAvailable is the units that can still be spent: what is left of the allowance, and the top-up units.
+// -1 when the answer did not say.
+func (s *Standing) UnitsAvailable() int64 {
+	if s == nil || s.UnitsRemaining == nil {
+		return -1
+	}
+	n := *s.UnitsRemaining
+	if s.UnitsTopup != nil {
+		n += *s.UnitsTopup
+	}
+	return n
+}
+
+// The formats [RunService.Export] asks the API to write records in.
+const (
+	// FormatCSV is a header row, then a row a record: a column for each field of the scraper's record schema.
+	FormatCSV = "csv"
+	// FormatNDJSON is one JSON record a line.
+	FormatNDJSON = "ndjson"
+)
+
+// RecordsExport is one page of a run's records as the API wrote it.
+type RecordsExport struct {
+	Format string
+	// Body is the page, UTF-8 text.
+	Body []byte
+	// NextCursor is where the next page starts (the X-Next-Cursor header); empty on the last page.
+	NextCursor string
+	// Expired is true when the records are gone: they are kept 7 days after a run ends.
+	Expired bool
 }
 
 // UsagePeriod is the first and last day (UTC, YYYY-MM-DD) a usage report covers, both included.

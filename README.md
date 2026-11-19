@@ -102,13 +102,18 @@ Without a key, `NewClient` returns `enrichednow.ErrMissingAPIKey`. The catalogue
 | `client.Scrape(ctx, id, input)` | Start a run, wait for its end, return it with a records iterator. |
 | `client.Scrapers.List(ctx)` | The catalogue. |
 | `client.Scrapers.Get(ctx, id)` | One scraper, with the JSON Schema of its input and of one record. |
-| `client.Scrapers.Run(ctx, id, input, params)` | Start a run. `params.Wait` holds the request open, up to 60 s. |
-| `client.Runs.Get(ctx, id)` | A run as it is now. |
+| `client.Scrapers.Run(ctx, id, input, params)` | Start a run. `params.Wait` holds the request open, up to 300 s; `params.WebhookURL` is told when it ends. |
+| `client.Runs.Get(ctx, id)` / `GetWait(ctx, id, wait)` | A run as it is now, or when it has ended (up to 300 s). |
 | `client.Runs.List(ctx, params)` / `ListAll` | Your runs, newest first: one page, or an iterator over all. |
 | `client.Runs.Wait(ctx, id, params)` | Poll until the run has ended. |
 | `client.Runs.Cancel(ctx, id)` | Ask a run to stop. |
 | `client.Runs.Records(ctx, id, params)` / `RecordsPage` | A run's records: an iterator, or one page. |
+| `client.Runs.Export(ctx, id, params)` / `ExportAll(ctx, id, format, w)` | A run's records as CSV or NDJSON, written by the API. |
+| `client.Runs.File(ctx, id, name)` | A file a run made. |
 | `client.Usage.Get(ctx, params)` | Units used over a period. |
+| `client.Usage.Standing(ctx)` / `client.Standing()` | Where the account stands: units left, top-up, runs that can start. |
+| `client.Webhooks.List` / `Create` / `Get` / `Update` / `Delete` / `RotateSecret` / `CreateRunSecret` | Webhook endpoints and secrets. |
+| `client.Webhooks.Deliveries.List` / `ListAll` / `Resend` | The delivery log. |
 | `client.Data.Companies.List` / `ListAll` / `Get` / `Postings` / `PostingsAll` | Datasets: companies. |
 | `client.Data.Postings.List` / `ListAll` / `Get` | Datasets: job postings. |
 | `client.Health(ctx)` | Is the service up. |
@@ -183,6 +188,78 @@ page, err := client.Runs.RecordsPage(ctx, run.ID, &enrichednow.RecordListParams{
 
 Records are kept for 7 days after a run ended. After that a records iterator stops with
 `enrichednow.ErrRecordsExpired`; the run itself stays.
+
+### CSV and NDJSON, written by the API
+
+```go
+f, _ := os.Create("jobs.csv")
+defer f.Close()
+err := client.Runs.ExportAll(ctx, run.ID, enrichednow.FormatCSV, f) // every page; the header row once
+
+page, err := client.Runs.Export(ctx, run.ID, enrichednow.ExportParams{Format: enrichednow.FormatNDJSON, Limit: 500})
+// page.Body, page.NextCursor, page.Expired
+```
+
+The CSV has a column for each field of the scraper's record schema, in its order; a nested object becomes
+`parent.child` columns, a list one cell of JSON, and a cell a spreadsheet would run as a formula starts with an
+apostrophe. A file a run made (a screenshot) is `client.Runs.File(ctx, run.ID, "screenshot.png")`.
+
+### Waiting longer in one call
+
+`RunParams.Wait` and `Runs.GetWait(ctx, id, wait)` hold the request open until the run ends, up to `MaxWait`
+(300 seconds). `RunListParams` also has `APIKeyID`, `From` and `To`.
+
+## Where the account stands
+
+Every answer about runs carries the account's units and runs in progress in its headers. `client.Standing()` is the
+last one seen; `client.Usage.Standing(ctx)` asks for it:
+
+```go
+s, err := client.Usage.Standing(ctx)
+fmt.Println(*s.UnitsRemaining, *s.UnitsTopup, s.UnitsReset, *s.RunsRemaining, s.Unmetered, s.UnitsAvailable())
+```
+
+`Usage.Unmetered` is true for an account with no unit limit.
+
+## Webhooks
+
+Endpoints are told when a run ends, signed with their secret:
+
+```go
+made, err := client.Webhooks.Create(ctx, enrichednow.WebhookEndpointParams{
+	URL:    "https://example.com/hooks/enrichednow",
+	Events: []string{enrichednow.EventRunSucceeded, enrichednow.EventRunFailed},
+})
+// made.Secret is shown this once: keep it.
+
+list, err := client.Webhooks.List(ctx)
+off := false
+_, err = client.Webhooks.Update(ctx, made.ID, enrichednow.WebhookEndpointChange{Enabled: &off})
+_, err = client.Webhooks.RotateSecret(ctx, made.ID)
+err = client.Webhooks.Delete(ctx, made.ID)
+
+secret, err := client.Webhooks.CreateRunSecret(ctx) // for RunParams.WebhookURL, one run's own URL
+for d, err := range client.Webhooks.Deliveries.ListAll(ctx, &enrichednow.WebhookDeliveryListParams{Status: "failed"}).All() { /* … */ }
+_, err = client.Webhooks.Deliveries.Resend(ctx, deliveryID)
+```
+
+And a request that arrives is checked before it is acted on: give the body exactly as it arrived.
+
+```go
+http.HandleFunc("/hooks/enrichednow", func(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	event, err := enrichednow.ParseWebhook(os.Getenv("ENRICHEDNOW_WEBHOOK_SECRET"), r.Header, body)
+	if err != nil {
+		http.Error(w, "bad signature", http.StatusBadRequest)
+		return
+	}
+	fmt.Println(event.ID, event.Type, event.Data.Run.ID)
+	w.WriteHeader(http.StatusNoContent)
+})
+```
+
+`VerifyWebhook` and `VerifyWebhookSignature` only check; both compare in constant time and refuse a timestamp more
+than 5 minutes from now. `event.ID` is the same on every attempt: use it to ignore a repeat.
 
 ## Datasets
 

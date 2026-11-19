@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,10 @@ type Client struct {
 	Usage *UsageService
 	// Data reads the datasets: companies and their job postings.
 	Data *DataService
+	// Webhooks manages the endpoints told when a run ends, their signing secrets, and the delivery log.
+	Webhooks *WebhookService
+
+	standing atomic.Pointer[Standing]
 
 	apiKey     string
 	baseURL    string
@@ -80,7 +85,15 @@ func NewClient(opts ...Option) (*Client, error) {
 		Companies: &CompanyService{client: c},
 		Postings:  &PostingService{client: c},
 	}
+	c.Webhooks = &WebhookService{client: c, Deliveries: &WebhookDeliveryService{client: c}}
 	return c, nil
+}
+
+// Standing is where the account stood at the last answer that said so: every answer about runs carries the
+// account's units and runs in progress in its headers. Nil until such an answer has come; [UsageService.Standing]
+// asks for it.
+func (c *Client) Standing() *Standing {
+	return c.standing.Load()
 }
 
 // Health asks whether the service is up. It needs no API key.
@@ -106,6 +119,14 @@ type request struct {
 	extraTimeout time.Duration
 	// idempotencyKey is sent as the Idempotency-Key header: what makes starting a run safe to send again.
 	idempotencyKey string
+	// accept is the Accept header; empty: application/json.
+	accept string
+}
+
+// answer is what came back of a request that succeeded.
+type answer struct {
+	header http.Header
+	data   []byte
 }
 
 const (
@@ -115,14 +136,32 @@ const (
 )
 
 func (c *Client) do(ctx context.Context, r request, out any) error {
+	got, err := c.send(ctx, r)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(got.data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(got.data, out); err != nil {
+		return fmt.Errorf("enrichednow: %s %s: decoding the response: %w", r.method, r.path, err)
+	}
+	if keeper, ok := out.(interface{ setRaw([]byte) }); ok {
+		keeper.setRaw(got.data)
+	}
+	return nil
+}
+
+// send sends the request, again while it is worth it, and returns the answer of the one that succeeded.
+func (c *Client) send(ctx context.Context, r request) (*answer, error) {
 	if c.apiKey == "" && !r.public {
-		return ErrMissingAPIKey
+		return nil, ErrMissingAPIKey
 	}
 	var payload []byte
 	if r.body != nil {
 		var err error
 		if payload, err = json.Marshal(r.body); err != nil {
-			return fmt.Errorf("enrichednow: encoding the request body: %w", err)
+			return nil, fmt.Errorf("enrichednow: encoding the request body: %w", err)
 		}
 	}
 	target := c.baseURL + r.path
@@ -137,19 +176,23 @@ func (c *Client) do(ctx context.Context, r request, out any) error {
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			if err := c.sleep(ctx, c.delay(attempt, lastErr)); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		lastErr = c.attempt(ctx, r, target, payload, out)
-		if lastErr == nil || !retryable(ctx, lastErr) {
-			return lastErr
+		var got *answer
+		got, lastErr = c.attempt(ctx, r, target, payload)
+		if lastErr == nil {
+			return got, nil
+		}
+		if !retryable(ctx, lastErr) {
+			return nil, lastErr
 		}
 	}
-	return lastErr
+	return nil, lastErr
 }
 
-// attempt sends the request once and decodes the answer.
-func (c *Client) attempt(ctx context.Context, r request, target string, payload []byte, out any) error {
+// attempt sends the request once.
+func (c *Client) attempt(ctx context.Context, r request, target string, payload []byte) (*answer, error) {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout+r.extraTimeout)
@@ -161,9 +204,13 @@ func (c *Client) attempt(ctx context.Context, r request, target string, payload 
 	}
 	req, err := http.NewRequestWithContext(ctx, r.method, target, body)
 	if err != nil {
-		return fmt.Errorf("enrichednow: %s %s: %w", r.method, r.path, err)
+		return nil, fmt.Errorf("enrichednow: %s %s: %w", r.method, r.path, err)
 	}
-	req.Header.Set("Accept", "application/json")
+	accept := r.accept
+	if accept == "" {
+		accept = "application/json"
+	}
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", c.userAgent)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -176,26 +223,41 @@ func (c *Client) attempt(ctx context.Context, r request, target string, payload 
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return &ConnectionError{Method: r.method, Path: r.path, Err: err}
+		return nil, &ConnectionError{Method: r.method, Path: r.path, Err: err}
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return &ConnectionError{Method: r.method, Path: r.path, Err: err}
+		return nil, &ConnectionError{Method: r.method, Path: r.path, Err: err}
+	}
+	if standing := standingFrom(resp.Header); standing != nil {
+		c.standing.Store(standing)
 	}
 	if resp.StatusCode >= 400 {
-		return apiError(r, resp, data)
+		return nil, apiError(r, resp, data)
 	}
-	if out == nil || len(data) == 0 {
+	return &answer{header: resp.Header, data: data}, nil
+}
+
+// standingFrom reads the account's standing off an answer's headers; nil when it carries none.
+func standingFrom(h http.Header) *Standing {
+	if h.Get("X-Units-Limit") == "" && h.Get("X-RateLimit-Limit") == "" {
 		return nil
 	}
-	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("enrichednow: %s %s: decoding the response: %w", r.method, r.path, err)
+	number := func(name string) *int64 {
+		v, err := strconv.ParseInt(strings.TrimSpace(h.Get(name)), 10, 64)
+		if err != nil {
+			return nil
+		}
+		return &v
 	}
-	if keeper, ok := out.(interface{ setRaw([]byte) }); ok {
-		keeper.setRaw(data)
+	s := &Standing{UnitsLimit: number("X-Units-Limit"), UnitsUsed: number("X-Units-Used"), UnitsRemaining: number("X-Units-Remaining"),
+		UnitsTopup: number("X-Units-Topup"), RunsLimit: number("X-RateLimit-Limit"), RunsRemaining: number("X-RateLimit-Remaining"),
+		Unmetered: h.Get("X-Units-Unmetered") == "true"}
+	if at, err := time.Parse(time.RFC3339, h.Get("X-Units-Reset")); err == nil {
+		s.UnitsReset = &at
 	}
-	return nil
+	return s
 }
 
 // ConnectionError is a request that got no answer: the connection failed, or the time ran out. Unwrap gives the

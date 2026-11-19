@@ -22,7 +22,7 @@
 //		log.Fatal(err)
 //	}
 //
-// The services mirror the API: [Client.Scrapers], [Client.Runs], [Client.Usage] and [Client.Data]. Every method
+// The services mirror the API: [Client.Scrapers], [Client.Runs], [Client.Usage], [Client.Data] and [Client.Webhooks]. Every method
 // takes a [context.Context]. Requests that are safe to repeat are retried with exponential backoff; starting a run
 // is never retried, because a repeated start is a second run.
 //
@@ -31,4 +31,4 @@
 package enrichednow
 
 // Version is the version of this SDK. It is sent in the User-Agent header.
-const Version = "0.1.1"
+const Version = "0.2.0"
