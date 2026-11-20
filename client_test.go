@@ -312,7 +312,10 @@ func TestErrorMapping(t *testing.T) {
 		{404, "not_found", "", []error{ErrNotFound}, []error{ErrValidation}, "404 not_found"},
 		{422, "invalid_input", `{"fields":[{"path":"input.board_url","message":"Field required"},{"path":"limit","message":"too big"}]}`,
 			[]error{ErrValidation}, []error{ErrNotFound}, "[input.board_url: Field required]"},
-		{402, "quota_exceeded", `{"used_units":1,"allowance_units":1}`, []error{ErrQuotaExceeded}, []error{ErrRateLimit}, "402 quota_exceeded"},
+		{402, "quota_exceeded", `{"used_units":1,"allowance_units":1}`, []error{ErrQuotaExceeded}, []error{ErrRateLimit, ErrLimitReached}, "402 quota_exceeded"},
+		// a spend limit of the account's own, or of the key: its own error, and still a quota error for code that checks that
+		{402, "limit_reached", `{"scope":"key","key_id":"key_1","limit_units":100,"used_units":100,"units_needed":1}`,
+			[]error{ErrLimitReached, ErrQuotaExceeded}, []error{ErrRateLimit}, "402 limit_reached"},
 		{429, "too_many_runs", `{"active_runs":2,"max_concurrent_runs":2}`, []error{ErrRateLimit, ErrTooManyRuns}, []error{ErrServer}, "too_many_runs"},
 		{429, "rate_limited", "", []error{ErrRateLimit}, []error{ErrTooManyRuns}, "rate_limited"},
 		{500, "internal", "", []error{ErrServer}, []error{ErrDataUnavailable}, "500 internal"},

@@ -28,6 +28,11 @@ var (
 	ErrValidation = errors.New("enrichednow: invalid input")
 	// ErrQuotaExceeded: this month's allowance is used up (402 quota_exceeded).
 	ErrQuotaExceeded = errors.New("enrichednow: quota exceeded")
+	// ErrLimitReached: the run would go past a spend limit the account set itself (402 limit_reached): its
+	// monthly limit (Details "scope" = "account") or the API key's ("scope" = "key", with "key_id"). Details also
+	// has "limit_units", "used_units" and "units_needed". Units may be left on the plan: raising the limit, in the
+	// console, is what helps. Such an error matches [ErrQuotaExceeded] too, so a check for that one still catches it.
+	ErrLimitReached = errors.New("enrichednow: spend limit reached")
 	// ErrRateLimit: any 429. It covers both too_many_runs and rate_limited.
 	ErrRateLimit = errors.New("enrichednow: rate limited")
 	// ErrTooManyRuns: the account is at its limit of runs going at the same time (429 too_many_runs).
@@ -52,6 +57,7 @@ const (
 	CodeNotFound        = "not_found"
 	CodeInvalidInput    = "invalid_input"
 	CodeQuotaExceeded   = "quota_exceeded"
+	CodeLimitReached    = "limit_reached"
 	CodeTooManyRuns     = "too_many_runs"
 	CodeRateLimited     = "rate_limited"
 	CodeInternal        = "internal"
@@ -70,7 +76,8 @@ type APIError struct {
 	Message string
 	// Details is always non-nil. For invalid_input it holds "fields"; for quota_exceeded "used_units" and
 	// "allowance_units", and on starting a run "topup_units" and "units_needed" (the least the run costs: its
-	// scraper's units a request, or a record for one record); for too_many_runs "active_runs" and "max_concurrent_runs"; for a forbidden answered
+	// scraper's units a request, or a record for one record); for limit_reached "scope", "key_id" (a key's),
+	// "limit_units", "used_units" and "units_needed"; for too_many_runs "active_runs" and "max_concurrent_runs"; for a forbidden answered
 	// because the account must confirm its email first, "reason" = "email_not_verified".
 	Details map[string]any
 	// RequestID is the X-Request-Id header of the response, when one was sent.
@@ -121,7 +128,9 @@ func (e *APIError) Is(target error) bool {
 	case ErrValidation:
 		return e.StatusCode == http.StatusUnprocessableEntity || e.Code == CodeInvalidInput
 	case ErrQuotaExceeded:
-		return e.StatusCode == http.StatusPaymentRequired || e.Code == CodeQuotaExceeded
+		return e.StatusCode == http.StatusPaymentRequired || e.Code == CodeQuotaExceeded || e.Code == CodeLimitReached
+	case ErrLimitReached:
+		return e.Code == CodeLimitReached
 	case ErrRateLimit:
 		return e.StatusCode == http.StatusTooManyRequests
 	case ErrTooManyRuns:

@@ -294,6 +294,7 @@ case errors.Is(err, enrichednow.ErrValidation) && errors.As(err, &apiErr):
 	for _, f := range apiErr.Fields() { // one per problem
 		fmt.Println(f.Path, f.Message) // input.board_url  Field required
 	}
+case errors.Is(err, enrichednow.ErrLimitReached):  // your own spend limit (the account's or the key's): raise it in the console
 case errors.Is(err, enrichednow.ErrQuotaExceeded): // this month's units are used up
 case errors.Is(err, enrichednow.ErrTooManyRuns):   // wait for one of your runs to end
 case errors.Is(err, enrichednow.ErrAuthentication):
@@ -306,7 +307,8 @@ An `*APIError` has `StatusCode`, the API's `Code` (match on this), `Message` (fo
 | `errors.Is(err, …)` | HTTP | API code |
 | --- | --- | --- |
 | `ErrAuthentication` | 401 | `unauthorized` |
-| `ErrQuotaExceeded` | 402 | `quota_exceeded` |
+| `ErrQuotaExceeded` | 402 | `quota_exceeded`, and `limit_reached` |
+| `ErrLimitReached` | 402 | `limit_reached`: a spend limit of the account's own, or of the key (`Details["scope"]`) |
 | `ErrPermission` | 403 | `forbidden` |
 | `ErrNotFound` | 404 | `not_found` |
 | `ErrValidation` | 422 | `invalid_input` |
