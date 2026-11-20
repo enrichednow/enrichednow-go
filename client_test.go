@@ -270,7 +270,7 @@ func TestEmptyIDsAreRefusedLocally(t *testing.T) {
 
 func TestRunDecoding(t *testing.T) {
 	const body = `{"id":"run_841742f37553189ff9c27ba1","scraper_id":"ats.board","scraper_version":1,"status":"ok","reason":null,` +
-		`"input":{"board_url":"https://boards.greenhouse.io/acme"},"record_count":21,"units":1,"diagnostics":{"requests":1,` +
+		`"input":{"board_url":"https://boards.greenhouse.io/acme"},"record_count":21,"units":1,"units_per_request":1,"units_per_record":null,"diagnostics":{"requests":1,` +
 		`"bytes":259214,"wall_ms":885,"facts":{"careers_url":"https://boards.greenhouse.io/acme","ats":"greenhouse","pages_read":1}},` +
 		`"created_at":"2026-11-16T22:37:50.170950Z","started_at":"2026-11-16T22:37:50.178331Z","finished_at":"2026-11-16T22:37:51.066313Z"}`
 	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, body) })
@@ -280,6 +280,9 @@ func TestRunDecoding(t *testing.T) {
 	}
 	if run.Status != RunOK || run.Reason != "" || run.RecordCount != 21 || run.Units != 1 || run.ScraperVersion != 1 {
 		t.Errorf("run = %+v", run)
+	}
+	if run.UnitsPerRequest == nil || *run.UnitsPerRequest != 1 || run.UnitsPerRecord != nil {
+		t.Errorf("rate = %v %v", run.UnitsPerRequest, run.UnitsPerRecord)
 	}
 	if run.Diagnostics == nil || *run.Diagnostics.Bytes != 259214 || *run.Diagnostics.WallMS != 885 || run.Diagnostics.Facts["ats"] != "greenhouse" {
 		t.Errorf("diagnostics = %+v", run.Diagnostics)
@@ -888,7 +891,7 @@ func TestUsageAndScraperDecoding(t *testing.T) {
 		case "/v1/usage":
 			writeJSON(w, 200, `{"period":{"from":"2026-11-01","to":"2026-11-16"},"total_units":13,"allowance_units":1000,"rows":[{"key":"data.postings.list","units":7,"runs":5},{"key":"ats.board","units":1,"runs":1}]}`)
 		case "/v1/scrapers":
-			writeJSON(w, 200, `{"scrapers":[{"id":"ats.board","version":1,"title":"ATS job board","summary":"Job openings.","mode":"job","billing_unit":"request","data_class":"public","availability":"public"}]}`)
+			writeJSON(w, 200, `{"scrapers":[{"id":"ats.board","version":1,"title":"ATS job board","summary":"Job openings.","mode":"job","billing_unit":"request","units_per_request":5,"units_per_record":null,"data_class":"public","availability":"public"}]}`)
 		case "/v1/scrapers/ats.board":
 			writeJSON(w, 200, `{"id":"ats.board","version":1,"title":"ATS job board","summary":"Job openings.","mode":"job","billing_unit":"request","data_class":"public","availability":"public","input_schema":{"type":"object","required":["board_url"]},"record_schema":{"type":"object"}}`)
 		}
@@ -899,11 +902,11 @@ func TestUsageAndScraperDecoding(t *testing.T) {
 		t.Errorf("usage = %+v, %v", u, err)
 	}
 	list, err := c.Scrapers.List(ctx)
-	if err != nil || len(list) != 1 || list[0].BillingUnit != "request" || list[0].Mode != "job" {
+	if err != nil || len(list) != 1 || list[0].BillingUnit != "request" || list[0].Mode != "job" || list[0].UnitCost() != 5 || list[0].UnitsPerRecord != nil {
 		t.Errorf("scrapers = %+v, %v", list, err)
 	}
 	s, err := c.Scrapers.Get(ctx, "ats.board")
-	if err != nil || s.ID != "ats.board" || s.Title != "ATS job board" || string(s.InputSchema) != `{"type":"object","required":["board_url"]}` {
+	if err != nil || s.ID != "ats.board" || s.Title != "ATS job board" || s.UnitCost() != 1 || string(s.InputSchema) != `{"type":"object","required":["board_url"]}` {
 		t.Errorf("scraper = %+v, %v", s, err)
 	}
 }

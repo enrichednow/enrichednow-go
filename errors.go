@@ -69,7 +69,8 @@ type APIError struct {
 	// Message is a sentence for a person. Its wording can change; do not parse it.
 	Message string
 	// Details is always non-nil. For invalid_input it holds "fields"; for quota_exceeded "used_units" and
-	// "allowance_units"; for too_many_runs "active_runs" and "max_concurrent_runs"; for a forbidden answered
+	// "allowance_units", and on starting a run "topup_units" and "units_needed" (the least the run costs: its
+	// scraper's units a request, or a record for one record); for too_many_runs "active_runs" and "max_concurrent_runs"; for a forbidden answered
 	// because the account must confirm its email first, "reason" = "email_not_verified".
 	Details map[string]any
 	// RequestID is the X-Request-Id header of the response, when one was sent.

@@ -19,10 +19,28 @@ type Scraper struct {
 	Summary string `json:"summary"`
 	// Mode is "sync" or "job".
 	Mode string `json:"mode"`
-	// BillingUnit is "request" (a charged run costs 1 unit) or "record" (1 unit for each record).
-	BillingUnit  string `json:"billing_unit"`
-	DataClass    string `json:"data_class"`
-	Availability string `json:"availability"`
+	// BillingUnit is "request" (a charged run costs UnitsPerRequest) or "record" (UnitsPerRecord for each record).
+	BillingUnit string `json:"billing_unit"`
+	// UnitsPerRequest is, for a scraper billed per request, the units a run that ends ok or partial costs;
+	// nil for one billed per record.
+	UnitsPerRequest *int `json:"units_per_request"`
+	// UnitsPerRecord is, for a scraper billed per record, the units each record of a charged run costs; nil
+	// for one billed per request.
+	UnitsPerRecord *int   `json:"units_per_record"`
+	DataClass      string `json:"data_class"`
+	Availability   string `json:"availability"`
+}
+
+// UnitCost is what the scraper costs, a run or a record by its billing unit: 1 when the API did not say.
+func (s Scraper) UnitCost() int {
+	cost := s.UnitsPerRequest
+	if s.BillingUnit == "record" {
+		cost = s.UnitsPerRecord
+	}
+	if cost == nil {
+		return 1
+	}
+	return *cost
 }
 
 // ScraperDetail is a scraper with the JSON Schema of its input and of one of its records.
@@ -70,6 +88,11 @@ type Run struct {
 	RecordCount int             `json:"record_count"`
 	// Units is what the run was charged: 0 until it ends ok or partial.
 	Units int `json:"units"`
+	// UnitsPerRequest is the run's rate, fixed when it started, for a scraper billed per request; nil otherwise.
+	UnitsPerRequest *int `json:"units_per_request"`
+	// UnitsPerRecord is the run's rate, fixed when it started, for a scraper billed per record (units a
+	// record); nil otherwise.
+	UnitsPerRecord *int `json:"units_per_record"`
 	// Diagnostics says what the run did; nil until it ends.
 	Diagnostics *RunDiagnostics `json:"diagnostics"`
 	CreatedAt   time.Time       `json:"created_at"`

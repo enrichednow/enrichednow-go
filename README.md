@@ -100,7 +100,7 @@ Without a key, `NewClient` returns `enrichednow.ErrMissingAPIKey`. The catalogue
 | | |
 | --- | --- |
 | `client.Scrape(ctx, id, input)` | Start a run, wait for its end, return it with a records iterator. |
-| `client.Scrapers.List(ctx)` | The catalogue. |
+| `client.Scrapers.List(ctx)` | The catalogue. Each `Scraper` says what it costs: `UnitCost()`, from `UnitsPerRequest` or `UnitsPerRecord`. |
 | `client.Scrapers.Get(ctx, id)` | One scraper, with the JSON Schema of its input and of one record. |
 | `client.Scrapers.Run(ctx, id, input, params)` | Start a run. `params.Wait` holds the request open, up to 300 s; `params.WebhookURL` is told when it ends. |
 | `client.Runs.Get(ctx, id)` / `GetWait(ctx, id, wait)` | A run as it is now, or when it has ended (up to 300 s). |

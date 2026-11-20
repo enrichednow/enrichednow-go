@@ -298,6 +298,16 @@ func TestVerifyAndParseWebhook(t *testing.T) {
 	if err != nil || event.ID != "evt_1" || event.Type != EventRunSucceeded || event.Data.Run.ID != "run_1" || event.Data.Run.RecordCount != 2 {
 		t.Fatalf("%v %+v", err, event)
 	}
+	if event.Data.Run.UnitsPerRequest != nil || event.Data.Run.UnitsPerRecord != nil {
+		t.Errorf("an event from before costs differed has no rate: %+v", event.Data.Run)
+	}
+	rated := []byte(strings.Replace(string(body), `"units":0,`, `"units":0,"units_per_request":null,"units_per_record":3,`, 1))
+	header.Set(HeaderWebhookSignature, sign(secret, now, rated))
+	event, err = ParseWebhook(secret, header, rated)
+	if err != nil || event.Data.Run.UnitsPerRecord == nil || *event.Data.Run.UnitsPerRecord != 3 || event.Data.Run.UnitsPerRequest != nil {
+		t.Fatalf("%v %+v", err, event)
+	}
+	header.Set(HeaderWebhookSignature, sign(secret, now, body))
 	old := strconv.FormatInt(time.Now().Unix()-301, 10)
 	cases := map[string][4]string{
 		"another secret":       {"whsec_other", now, string(body), sign(secret, now, body)},
