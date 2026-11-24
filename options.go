@@ -34,7 +34,7 @@ type config struct {
 func WithAPIKey(key string) Option { return func(c *config) { c.apiKey = key } }
 
 // WithoutAPIKey lets [NewClient] build a client that has no key. Such a client can call only what needs none:
-// [Client.Health], [ScraperService.List] and [ScraperService.Get].
+// [Client.Health], [ScraperService.List], [ScraperService.Get], [FormulaService.List] and [FormulaService.Get].
 func WithoutAPIKey() Option { return func(c *config) { c.anonymous = true } }
 
 // WithBaseURL sets the address of the API. The default is [DefaultBaseURL].

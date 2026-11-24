@@ -22,13 +22,21 @@
 //		log.Fatal(err)
 //	}
 //
-// The services mirror the API: [Client.Scrapers], [Client.Runs], [Client.Usage], [Client.Data] and [Client.Webhooks]. Every method
-// takes a [context.Context]. Requests that are safe to repeat are retried with exponential backoff; starting a run
-// is never retried, because a repeated start is a second run.
+// Or run a formula — a ready-made way from a few parameters to a finished list of rows — with its parameter type:
+//
+//	run, rows, err := client.RunFormula(ctx, "job-order-hunter", enrichednow.JobOrderHunterParams{
+//		JobTitles: []string{"Java Developer"},
+//		Locations: []string{"London"},
+//	}, nil)
+//
+// The services mirror the API: [Client.Scrapers], [Client.Runs], [Client.Usage], [Client.Data], [Client.Webhooks],
+// [Client.Formulas], [Client.FormulaRuns], [Client.SavedFormulas], [Client.Suppressions], [Client.Attestations]
+// and [Client.FormulaRows]. Every method takes a [context.Context]. Requests that are safe to repeat are retried
+// with exponential backoff; starting a run carries an idempotency key, so that a retry never starts a second run.
 //
 // Errors answered by the API are [*APIError] values and match the sentinel errors of this package with
 // [errors.Is]: [ErrAuthentication], [ErrNotFound], [ErrValidation], [ErrRateLimit], [ErrServer] and the others.
 package enrichednow
 
 // Version is the version of this SDK. It is sent in the User-Agent header.
-const Version = "0.3.1"
+const Version = "0.4.0"

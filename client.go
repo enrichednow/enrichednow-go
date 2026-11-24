@@ -29,6 +29,19 @@ type Client struct {
 	Data *DataService
 	// Webhooks manages the endpoints told when a run ends, their signing secrets, and the delivery log.
 	Webhooks *WebhookService
+	// Formulas is the catalogue of formulas — ready-made ways from a few parameters to a finished list of rows —
+	// and where their runs are started.
+	Formulas *FormulaService
+	// FormulaRuns reads, waits for and cancels formula runs, and reads their rows.
+	FormulaRuns *FormulaRunService
+	// SavedFormulas are formulas saved with their parameters, run again by hand or on a schedule.
+	SavedFormulas *SavedFormulaService
+	// Suppressions is the account's suppression list: domains, addresses and company names no formula returns.
+	Suppressions *SuppressionService
+	// Attestations are the terms some formulas need accepted before they run.
+	Attestations *AttestationService
+	// FormulaRows takes feedback on a row: a wrong company, a wrong contact, not relevant.
+	FormulaRows *FormulaRowService
 
 	standing atomic.Pointer[Standing]
 
@@ -86,6 +99,12 @@ func NewClient(opts ...Option) (*Client, error) {
 		Postings:  &PostingService{client: c},
 	}
 	c.Webhooks = &WebhookService{client: c, Deliveries: &WebhookDeliveryService{client: c}}
+	c.Formulas = &FormulaService{client: c}
+	c.FormulaRuns = &FormulaRunService{client: c}
+	c.SavedFormulas = &SavedFormulaService{client: c}
+	c.Suppressions = &SuppressionService{client: c}
+	c.Attestations = &AttestationService{client: c}
+	c.FormulaRows = &FormulaRowService{client: c}
 	return c, nil
 }
 
@@ -121,6 +140,9 @@ type request struct {
 	idempotencyKey string
 	// accept is the Accept header; empty: application/json.
 	accept string
+	// payload, when set, is sent as it is instead of body, with contentType: a body that is not JSON.
+	payload     []byte
+	contentType string
 }
 
 // answer is what came back of a request that succeeded.
@@ -157,8 +179,8 @@ func (c *Client) send(ctx context.Context, r request) (*answer, error) {
 	if c.apiKey == "" && !r.public {
 		return nil, ErrMissingAPIKey
 	}
-	var payload []byte
-	if r.body != nil {
+	payload := r.payload
+	if payload == nil && r.body != nil {
 		var err error
 		if payload, err = json.Marshal(r.body); err != nil {
 			return nil, fmt.Errorf("enrichednow: encoding the request body: %w", err)
@@ -213,7 +235,11 @@ func (c *Client) attempt(ctx context.Context, r request, target string, payload 
 	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", c.userAgent)
 	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+		contentType := r.contentType
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		req.Header.Set("Content-Type", contentType)
 	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)

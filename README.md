@@ -4,7 +4,7 @@
 [![CI](https://github.com/enrichednow/enrichednow-go/actions/workflows/ci.yml/badge.svg)](https://github.com/enrichednow/enrichednow-go/actions/workflows/ci.yml)
 
 The official Go client for the [EnrichedNow API](https://docs.enrichednow.com): run scrapers, read their records,
-and query the datasets.
+run formulas for finished lists of rows, and query the datasets.
 
 - Standard library only — no dependencies.
 - Go 1.22 or later.
@@ -116,6 +116,15 @@ Without a key, `NewClient` returns `enrichednow.ErrMissingAPIKey`. The catalogue
 | `client.Webhooks.Deliveries.List` / `ListAll` / `Resend` | The delivery log. |
 | `client.Data.Companies.List` / `ListAll` / `Get` / `Postings` / `PostingsAll` | Datasets: companies. |
 | `client.Data.Postings.List` / `ListAll` / `Get` | Datasets: job postings. |
+| `client.RunFormula(ctx, id, params, opts)` | Run a formula, wait for its end, return it with a rows iterator. |
+| `client.Formulas.List` / `Get` / `Estimate` / `Run` | The formulas: the catalogue, one with its parameters, what a run would cost, starting one. |
+| `client.FormulaRuns.List` / `ListAll` / `Get` / `GetWait` / `Wait` / `Cancel` | Formula runs. |
+| `client.FormulaRuns.Rows` / `RowsPage` / `Export` / `ExportAll` | A formula run's rows: an iterator, one page, or CSV and NDJSON written by the API. |
+| `client.SavedFormulas.Create` / `List` / `ListAll` / `Get` / `Update` / `Archive` / `Duplicate` | Saved formulas: params and caps kept, run by hand or on a schedule. |
+| `client.SavedFormulas.Run` / `Pause` / `Resume` / `ResetSeen` / `Rows` / `RowsPage` / `Export` / `ExportAll` / `Snapshots` / `Limits` | Running them, their schedule, their rows, what the plan allows. |
+| `client.Suppressions.List` / `ListAll` / `Add` / `Upload` / `Delete` | The suppression list: what no formula returns. |
+| `client.Attestations.List` | The terms some formulas need accepted. |
+| `client.FormulaRows.Feedback` | Say what is wrong with a row. |
 | `client.Health(ctx)` | Is the service up. |
 
 ## Runs
@@ -283,6 +292,124 @@ data unit for each record it returns, so `ListAll` and `PostingsAll` are charged
 
 In these types a value that is not known is `nil` — never an empty string and never `0`.
 
+## Formulas
+
+A formula is a ready-made way from a few parameters to a finished list of rows: companies hiring for your roles
+with the person to contact, an account list researched, a directory turned into leads. Each formula has a
+parameter type in this package, made from its parameters' schema (`JobOrderHunterParams`, `AccountResearchParams`
+… `enrichednow.FormulaIDs` lists them); a map or a struct of yours works too, for any formula.
+
+```go
+run, rows, err := client.RunFormula(ctx, "job-order-hunter", enrichednow.JobOrderHunterParams{
+	JobTitles:        []string{"Java Developer"},
+	Locations:        []string{"London"},
+	PostedWithinDays: enrichednow.Ptr(7), // an optional field is a pointer: nil leaves the formula's default
+}, &enrichednow.RunFormulaParams{UnitCap: 2000})
+var failed *enrichednow.FormulaRunFailedError
+if errors.As(err, &failed) {
+	log.Fatalf("the run ended %s: %s", failed.Status(), failed.Reason())
+} else if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(run.Status, run.RowsTotal, "rows,", run.UnitsSpent, "units") // partial is not an error: run.Reasons say why
+
+type Lead struct {
+	CompanyName  string `json:"company_name"`
+	ContactEmail string `json:"contact_email"`
+}
+for rows.Next() {
+	row := rows.Current() // ID, Data (the columns), Score, Evidence (where each column came from), Status
+	lead, _ := enrichednow.Decode[Lead](row.Data)
+	fmt.Println(lead.CompanyName, lead.ContactEmail, *row.Score)
+}
+```
+
+A parameter type knows its formula: giving `JobOrderHunterParams` to another formula is refused before anything is
+sent. `RunFormula` waits up to 10 minutes (`RunFormulaParams.Timeout`); when the time is up the run goes on, and it
+comes back with an error that matches `context.DeadlineExceeded`.
+
+The steps, for when you want them:
+
+```go
+details, err := client.Formulas.Get(ctx, "job-order-hunter")   // what it does, details.Parameters (JSON Schema), Columns, Presets
+list, err := client.Formulas.List(ctx, &enrichednow.FormulaListParams{Category: "recruiting"}) // the catalogue needs no key
+
+estimate, err := client.Formulas.Estimate(ctx, "job-order-hunter", params, nil) // spends nothing
+if !estimate.Valid {
+	for _, problem := range estimate.Errors { // params that cannot run are an answer, not an error
+		fmt.Println(problem.Path, problem.Message)
+	}
+}
+fmt.Println(estimate.Estimate.ExpectedUnits, estimate.Estimate.MaxUnits)
+
+run, err := client.Formulas.Run(ctx, "job-order-hunter", params, &enrichednow.FormulaRunParams{
+	Preview: true,           // at most 10 rows and 50 units
+	UnitCap: 2000,           // the most it may spend: it stops at the cap and ends partial
+	Wait:    time.Minute,    // hold the request until it ends, up to 300 s
+})
+run, err = client.FormulaRuns.Wait(ctx, run.ID, &enrichednow.FormulaWaitParams{Timeout: 5 * time.Minute})
+_, err = client.FormulaRuns.Cancel(ctx, run.ID)
+
+it := client.FormulaRuns.Rows(ctx, run.ID, &enrichednow.FormulaRowListParams{
+	Fields:   []string{"company_name", "contact_email"},
+	MinScore: enrichednow.Ptr(30.0),
+	View:     enrichednow.ViewCompany, // one row per company, for a formula with details.CompanyView
+})
+
+f, _ := os.Create("leads.csv")
+err = client.FormulaRuns.ExportAll(ctx, run.ID, enrichednow.FormulaExportParams{Format: enrichednow.FormatCSV}, f) // the header once
+```
+
+Starting a run carries an `Idempotency-Key` and is retried as a scraper run is (`FormulaRunParams.IdempotencyKey` to
+make a call of yours repeatable). A formula whose `NeedsAttestation` is true returns people: an owner or an admin
+must accept its terms in the console first (`client.Attestations.List` shows them; a key cannot accept them).
+
+### Saved formulas
+
+A saved formula keeps its params and caps, runs by hand or on a schedule, and delivers only rows it did not
+deliver before. Poll its new rows with `Since`:
+
+```go
+saved, err := client.SavedFormulas.Create(ctx, "job-order-hunter", params, &enrichednow.SavedFormulaCreateParams{
+	Schedule:       &enrichednow.ScheduleParams{Cadence: enrichednow.CadenceWeekdays, LocalTime: "07:30", Timezone: "Europe/London"},
+	MonthlyUnitCap: 20000,
+	Notify:         enrichednow.NotifyDigest,
+})
+
+for row, err := range client.SavedFormulas.Rows(ctx, saved.ID, &enrichednow.SavedFormulaRowListParams{Since: lastLook}).All() {
+	// …
+}
+
+run, err := client.SavedFormulas.Run(ctx, saved.ID, &enrichednow.SavedFormulaRunParams{Wait: time.Minute})
+_, err = client.SavedFormulas.Pause(ctx, saved.ID) // and Resume
+_, err = client.SavedFormulas.Update(ctx, saved.ID, enrichednow.SavedFormulaUpdateParams{
+	RemoveSchedule: true, // the API's null: AutoName and RemoveMonthlyUnitCap take a setting away the same way
+})
+copied, err := client.SavedFormulas.Duplicate(ctx, saved.ID, &enrichednow.SavedFormulaDuplicateParams{CopySeen: true})
+_, err = client.SavedFormulas.Archive(ctx, saved.ID)
+limits, err := client.SavedFormulas.Limits(ctx) // schedules, the shortest interval, how long rows are kept
+```
+
+### The suppression list, and feedback on a row
+
+Domains, addresses and company names on the suppression list never come back in a formula's rows:
+
+```go
+added, err := client.Suppressions.Add(ctx, []enrichednow.SuppressionEntry{
+	{Kind: enrichednow.SuppressDomain, Value: "globex.example"},
+	{Kind: enrichednow.SuppressEmail, Value: "ana@initech.example"},
+}, nil)
+
+f, _ := os.Open("customers.csv") // a header row with kind and value, or one value a line
+upload, err := client.Suppressions.Upload(ctx, f, nil)
+fmt.Println(upload.Added, upload.Already, upload.Invalid)
+
+err = client.Suppressions.Delete(ctx, enrichednow.SuppressDomain, "globex.example")
+
+_, err = client.FormulaRows.Feedback(ctx, row.ID, enrichednow.VerdictWrongCompany,
+	&enrichednow.RowFeedbackParams{CorrectDomain: "corvid.example"}) // this account's runs match it right from now on
+```
+
 ## Errors
 
 ```go
@@ -308,15 +435,21 @@ An `*APIError` has `StatusCode`, the API's `Code` (match on this), `Message` (fo
 | --- | --- | --- |
 | `ErrAuthentication` | 401 | `unauthorized` |
 | `ErrQuotaExceeded` | 402 | `quota_exceeded`, and `limit_reached` |
-| `ErrLimitReached` | 402 | `limit_reached`: a spend limit of the account's own, or of the key (`Details["scope"]`) |
-| `ErrPermission` | 403 | `forbidden` |
-| `ErrNotFound` | 404 | `not_found` |
-| `ErrValidation` | 422 | `invalid_input` |
+| `ErrLimitReached` | 402 | `limit_reached`: a spend limit of the account's own, of the key, or a saved formula's monthly cap (`Details["scope"]`: `account`, `key`, `saved_formula`, `formula_run`) |
+| `ErrPermission` | 403 | `forbidden`, `plan_limit_reached` |
+| `ErrPlanLimitReached` | 403 | `plan_limit_reached`: the plan does not allow it (`Details["limit"]`, `["allowed"]`) |
+| `ErrNotFound` | 404 | `not_found`, `formula_not_found` |
+| `ErrConflict` | 409 | `idempotency_conflict`, and the four below |
+| `ErrAttestationRequired` | 409 | `attestation_required`: an owner or an admin must accept the formula's terms in the console |
+| `ErrFormulaUnavailable` | 409 | `formula_unavailable`: e.g. a deprecated formula |
+| `ErrRequirementMissing` | 409 | `requirement_missing`: `apiErr.Missing()` says what the account lacks |
+| `ErrSavedFormulaArchived` | 409 | `saved_formula_archived`: duplicate it to use it again |
+| `ErrValidation` | 422 | `invalid_input`, `unit_cap_too_low` (`apiErr.MinUnitCap()`) |
 | `ErrRateLimit` | 429 | `too_many_runs`, `rate_limited` |
 | `ErrTooManyRuns` | 429 | `too_many_runs` |
 | `ErrServer` | 5xx | `internal`, `data_unavailable` |
 | `ErrDataUnavailable` | 503 | `data_unavailable` |
-| `ErrRunFailed` | — | a `*RunFailedError`: the run ended `failed`, `unsupported` or `cancelled` |
+| `ErrRunFailed` | — | a `*RunFailedError` or a `*FormulaRunFailedError`: the run ended `failed`, `unsupported` or `cancelled` |
 
 A request that got no answer — a dropped connection, a timeout — is a `*ConnectionError`.
 
@@ -327,7 +460,9 @@ Requests that are safe to repeat — every read, cancelling a run, and starting 
 what `Retry-After` asks for, or else 0.5 s doubling up to 8 s, with jitter.
 
 **Starting a run is safe to repeat too.** `Scrapers.Run` and `Scrape` send an `Idempotency-Key` with the request, a
-new one for each call, so a retry gets the run the first attempt started and never a second one. To make a call of
+new one for each call, so a retry gets the run the first attempt started and never a second one — and so do
+`Formulas.Run`, `RunFormula` and `SavedFormulas.Run`. Creating a webhook endpoint or a saved formula, and
+duplicating a saved formula, are not sent again after a failure that may have reached the API. To make a call of
 your own repeatable (a job that may be restarted, say), set `RunParams.IdempotencyKey`: for 24 hours the same key
 with the same request gives the same run, and with a different request fails with `ErrConflict`.
 
